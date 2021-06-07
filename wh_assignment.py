@@ -33,11 +33,11 @@ class WarehouseAssigner:
         self.df_riders = None
         self.df_distance = None
         self.df_stage_id = None
-        self.df_opening = None
         self.df_holiday = None
         self.df_already_assigned = None
         self.date_assigned_output = pd.DataFrame(columns=['ID', 'key', 'value'])
         self.warehouse_assigned_output = pd.DataFrame(columns=['ID', 'key', 'value'])
+        self.schedule_assigned_output = pd.DataFrame(columns=['ID', 'key', 'value'])
         self.stage_update_output = pd.DataFrame(columns=['id', 'destination'])
         self.riders_score_log_output = pd.DataFrame(columns=['Rider external ID', 'Rider email', 'Score'])
 
@@ -56,7 +56,7 @@ class WarehouseAssigner:
         gc = gspread.oauth()
 
         # Open spreadsheet
-        sh = gc.open_by_key(self.spreadsheet_id)
+        sh = gc.open_by_key(spreadsheet_id)
 
         # Load worksheet data
         riders_worksheet = sh.worksheet(riders_sheet_name)
@@ -182,9 +182,10 @@ class WarehouseAssigner:
             lambda row: max(weekdays[row['Week']][0], row['Opening date']) if pd.notnull(row['Opening date']) else
             weekdays[row['Week']][0], axis=1))
 
+        # build id for unique assignment
         self.df_forecast['forecast_id'] = self.df_forecast['Week'].astype(str) + self.df_forecast['Warehouse']
 
-        # Set index on warehouse name
+        # Set index on forecast_id
         self.df_forecast.set_index('forecast_id', inplace=True)
         self.df_forecast.sort_index(inplace=True)
 
@@ -252,6 +253,12 @@ class WarehouseAssigner:
             ),
             axis=1)
 
+        # Clean schedule pref column
+        # if = weekends OR weekdays, don’t touch
+        # if = weekends AND weekdays, replace by weekends
+        self.df_riders.loc[:, 'Schedule pref'] = self.df_riders[
+            'Schedule pref'].apply(
+            lambda x: 'Weekends (Thursday-Saturday)' if 'Weekends' in x and 'Weekdays' in x else x)
         # Count number of preferences and add a column for this feature
         self.df_riders['nr_preferences'] = self.df_riders[
             'Warehouse location preference'].apply(lambda x: len(x.split(',')))
@@ -407,7 +414,8 @@ class WarehouseAssigner:
                         'warehouse': forecast.loc[[preferences.columns[j]], 'Warehouse'].tolist()[0],
                         'start_date': start_date,
                         'cost': cost[i][j],
-                        'email': riders.loc[[preferences.index[i]], 'Email'].tolist()[0]
+                        'email': riders.loc[[preferences.index[i]], 'Email'].tolist()[0],
+                        'schedule_pref': riders.loc[[preferences.index[i]], 'Schedule pref'].tolist()[0]
                     })
         df_assigned = pd.DataFrame(res)
 
@@ -428,6 +436,12 @@ class WarehouseAssigner:
         batch_warehouse_assigned.rename(columns={'rider_id': 'ID',
                                                  'warehouse': 'value'}, inplace=True)
         self.warehouse_assigned_output = self.warehouse_assigned_output.append(batch_warehouse_assigned)
+
+        batch_schedule_assigned = df_assigned[['rider_id', 'schedule_pref']]
+        batch_schedule_assigned.loc[:, 'key'] = 'schedule_pref'
+        batch_schedule_assigned.rename(columns={'rider_id': 'ID',
+                                                'schedule_pref': 'value'}, inplace=True)
+        self.schedule_assigned_output = self.schedule_assigned_output.append(batch_schedule_assigned)
 
         batch_stage_update = df_assigned[['rider_id', 'destination']]
         batch_stage_update.rename(columns={'rider_id': 'id'}, inplace=True)
@@ -460,8 +474,8 @@ class WarehouseAssigner:
                         'warehouse': warehouse,
                         'start_date': start_date,
                         'cost': 100,
-                        'email': riders['Email']})
-
+                        'email': rider['Email'],
+                        'schedule_pref': rider['Schedule pref']})
         df_assigned = pd.DataFrame(res)
         return df_assigned
 
@@ -518,6 +532,7 @@ class WarehouseAssigner:
             forecast_worksheet = sh.worksheet('Input/output 1 Forecast')
             date_assigned_worksheet = sh.worksheet('Output 2 Date assigned')
             wh_assigned_worksheet = sh.worksheet('Output 3 WH assigned')
+            schedule_assigned_worksheet = sh.worksheet('Output 6 Schedule pref')
             stage_update_worksheet = sh.worksheet('Output 4 Stage update')
             riders_score_worksheet = sh.worksheet('Output 5 Riders score log')
 
@@ -536,6 +551,14 @@ class WarehouseAssigner:
             wh_assigned_worksheet.update_cells(range_of_cells)
             # APPEND wh_assigned_worksheet to SHEET CONTENT
             set_with_dataframe(wh_assigned_worksheet, self.warehouse_assigned_output)
+
+            # CLEAR schedule_assigned_worksheet SHEET CONTENT
+            range_of_cells = schedule_assigned_worksheet.range('A2:C1000')  # -> Select the range you want to clear
+            for cell in range_of_cells:
+                cell.value = ''
+            schedule_assigned_worksheet.update_cells(range_of_cells)
+            # APPEND schedule_assigned_worksheet to SHEET CONTENT
+            set_with_dataframe(schedule_assigned_worksheet, self.schedule_assigned_output)
 
             # CLEAR stage_update_worksheet SHEET CONTENT
             range_of_cells = stage_update_worksheet.range('A2:C1000')  # -> Select the range you want to clear
